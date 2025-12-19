@@ -3,24 +3,38 @@ package monitor
 import "regexp"
 
 var defaultPatterns = []string{
+	// Yes/No prompts
 	`\[Y/n\]`,
 	`\[y/N\]`,
 	`\(y/n\)`,
 	`\(Y/n\)`,
+	// Questions
 	`\?\s*$`,
+	`Do you want to`,
+	// Action prompts
 	`Press Enter`,
 	`press enter`,
 	`Choose.*:\s*$`,
 	`Select.*:\s*$`,
 	`Enter.*:\s*$`,
 	`Type.*:\s*$`,
+	// Waiting states
 	`waiting for.*input`,
 	`Waiting for.*input`,
+	// Confirmations
 	`continue\?`,
 	`proceed\?`,
 	`confirm`,
+	// CLI selectors (Claude Code uses these)
+	`❯\s+\d+\.`,         // ❯ 1. Yes
+	`^\s*❯`,             // Line starting with ❯
 	`>>\s*$`,
-	`❯\s*$`,
+	// Claude Code specific
+	`Create file`,
+	`Edit file`,
+	`Run command`,
+	`Allow once`,
+	`Allow all`,
 }
 
 var compiledPatterns []*regexp.Regexp

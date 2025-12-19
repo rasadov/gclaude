@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -44,6 +46,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(monitorCmd)
 }
 
 var versionCmd = &cobra.Command{
@@ -57,42 +60,59 @@ var versionCmd = &cobra.Command{
 var (
 	startNoWorktree bool
 	startPrompt     string
+	startDetach     bool
 )
 
 var startCmd = &cobra.Command{
-	Use:   "start <branch>",
-	Short: "Start a new Claude session on a branch",
-	Args:  cobra.ExactArgs(1),
+	Use:   "start [branch]",
+	Short: "Start a new Claude session (optionally on a branch with worktree)",
+	Long: `Start a new Claude Code session.
+
+If no branch is specified, starts Claude in the current directory.
+If a branch is specified, creates a git worktree and starts Claude there.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		branch := args[0]
 		cwd, err := os.Getwd()
 		if err != nil {
 			return err
 		}
 
+		var branch string
+		var createWorktree bool
+
+		if len(args) == 0 {
+			// No branch specified - use current directory
+			branch = filepath.Base(cwd)
+			createWorktree = false
+		} else {
+			branch = args[0]
+			createWorktree = !startNoWorktree
+		}
+
 		mgr := session.NewManager()
-		sess, err := mgr.Start(branch, cwd, !startNoWorktree)
+		sess, err := mgr.Start(branch, cwd, createWorktree)
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("Started session for branch '%s'\n", sess.Branch)
-		fmt.Printf("  Worktree: %s\n", sess.WorktreePath)
+		fmt.Printf("Started session '%s'\n", sess.Branch)
+		fmt.Printf("  Directory: %s\n", sess.WorktreePath)
 		fmt.Printf("  tmux: %s\n", sess.TmuxSession)
 
-		cfg, _ := config.Load()
-		mon := monitor.New(mgr.GetStore(), cfg)
-		mon.Start()
+		// Start background monitor for notifications
+		if err := spawnMonitor(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to start monitor: %v\n", err)
+		} else {
+			fmt.Println("  Monitor: started (notifications enabled)")
+		}
 
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-		fmt.Println("\nMonitoring for input prompts. Press Ctrl+C to stop monitoring (session continues).")
-		fmt.Printf("Use 'gclaude attach %s' to attach to the session.\n", branch)
-
-		<-sigChan
-		mon.Stop()
-		fmt.Println("\nMonitoring stopped. Session continues in background.")
+		if startDetach {
+			fmt.Printf("\nSession running in background. Use 'gclaude attach %s' to attach.\n", sess.Branch)
+		} else {
+			// Default: attach to session immediately
+			fmt.Println("\nAttaching to session... (detach with Ctrl+B, D)")
+			return mgr.Attach(sess.Branch)
+		}
 
 		return nil
 	},
@@ -101,6 +121,7 @@ var startCmd = &cobra.Command{
 func init() {
 	startCmd.Flags().BoolVar(&startNoWorktree, "no-worktree", false, "Don't create a worktree, use current directory")
 	startCmd.Flags().StringVarP(&startPrompt, "prompt", "p", "", "Initial prompt to send to Claude")
+	startCmd.Flags().BoolVarP(&startDetach, "detach", "d", false, "Start session in background (don't attach)")
 }
 
 var (
@@ -276,4 +297,46 @@ var configSetCmd = &cobra.Command{
 func init() {
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configSetCmd)
+}
+
+var monitorCmd = &cobra.Command{
+	Use:    "monitor",
+	Short:  "Run the background monitor daemon",
+	Hidden: true, // Hidden because it's auto-spawned
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+
+		store := session.GetStore()
+		mon := monitor.New(store, cfg)
+		mon.Start()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+		<-sigChan
+		mon.Stop()
+		return nil
+	},
+}
+
+func spawnMonitor() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(exe, "monitor")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Stdin = nil
+
+	// Detach from parent process
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	return cmd.Start()
 }

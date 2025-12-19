@@ -3,6 +3,7 @@ package tmux
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -37,7 +38,9 @@ func KillSession(name string) error {
 
 func AttachSession(name string) error {
 	cmd := exec.Command("tmux", "attach-session", "-t", name)
-	cmd.Stdin = nil
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 

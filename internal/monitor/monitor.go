@@ -1,7 +1,6 @@
 package monitor
 
 import (
-	"strings"
 	"sync"
 	"time"
 
@@ -11,23 +10,28 @@ import (
 	"github.com/bb/gclaude/internal/tmux"
 )
 
+type sessionState struct {
+	lastOutput    string
+	lastChange    time.Time
+	notified      bool
+	wasActive     bool
+}
+
 type Monitor struct {
-	store         *session.Store
-	cfg           *config.Config
-	stopChan      chan struct{}
-	wg            sync.WaitGroup
-	lastOutputs   map[string]string
-	lastNotify    map[string]time.Time
-	mu            sync.Mutex
+	store    *session.Store
+	cfg      *config.Config
+	stopChan chan struct{}
+	wg       sync.WaitGroup
+	states   map[string]*sessionState
+	mu       sync.Mutex
 }
 
 func New(store *session.Store, cfg *config.Config) *Monitor {
 	return &Monitor{
-		store:       store,
-		cfg:         cfg,
-		stopChan:    make(chan struct{}),
-		lastOutputs: make(map[string]string),
-		lastNotify:  make(map[string]time.Time),
+		store:    store,
+		cfg:      cfg,
+		stopChan: make(chan struct{}),
+		states:   make(map[string]*sessionState),
 	}
 }
 
@@ -73,66 +77,67 @@ func (m *Monitor) checkSessions() {
 			continue
 		}
 
-		output, err := tmux.CapturePane(sess.TmuxSession, 50)
+		output, err := tmux.CapturePane(sess.TmuxSession, 100)
 		if err != nil {
 			continue
 		}
 
 		m.mu.Lock()
-		lastOutput := m.lastOutputs[sess.ID]
-		m.lastOutputs[sess.ID] = output
-		m.mu.Unlock()
+		state, exists := m.states[sess.ID]
+		if !exists {
+			state = &sessionState{
+				lastOutput: output,
+				lastChange: time.Now(),
+				notified:   false,
+				wasActive:  true,
+			}
+			m.states[sess.ID] = state
+			m.mu.Unlock()
+			continue
+		}
 
-		outputChanged := output != lastOutput
+		outputChanged := output != state.lastOutput
+		now := time.Now()
+
 		if outputChanged {
+			// Output is changing - Claude is active
+			state.lastOutput = output
+			state.lastChange = now
+			state.notified = false
+			state.wasActive = true
 			sess.UpdateActivity()
+			sess.Status = session.StatusRunning
+			sess.NeedsInput = false
+			m.store.Update(sess)
+		} else {
+			// Output hasn't changed
+			idleTime := now.Sub(state.lastChange)
+			idleThreshold := time.Duration(m.cfg.Monitor.IdleThresholdS) * time.Second
+
+			if idleTime > idleThreshold && state.wasActive && !state.notified {
+				// Claude has stopped - notify user
+				state.notified = true
+				state.wasActive = false
+				sess.Status = session.StatusWaitingInput
+				sess.NeedsInput = true
+				m.store.Update(sess)
+
+				m.notify(sess)
+			}
 		}
-
-		lastLines := getLastLines(output, 5)
-		needsInput := MatchesInputPattern(lastLines)
-
-		idleThreshold := time.Duration(m.cfg.Monitor.IdleThresholdS) * time.Second
-		isIdle := time.Since(sess.LastActivity) > idleThreshold
-
-		if needsInput && isIdle && !sess.NeedsInput {
-			sess.SetNeedsInput(true)
-			m.store.Update(sess)
-			m.maybeNotify(sess)
-		} else if !needsInput && sess.NeedsInput {
-			sess.SetNeedsInput(false)
-			m.store.Update(sess)
-		} else if outputChanged {
-			m.store.Update(sess)
-		}
+		m.mu.Unlock()
 	}
 }
 
-func (m *Monitor) maybeNotify(sess *session.Session) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	debounce := time.Duration(m.cfg.Monitor.DebounceSecs) * time.Second
-	lastTime, exists := m.lastNotify[sess.ID]
-	if exists && time.Since(lastTime) < debounce {
-		return
-	}
-
-	m.lastNotify[sess.ID] = time.Now()
+func (m *Monitor) notify(sess *session.Session) {
+	title := "gclaude: " + sess.Branch
+	message := "Claude has stopped - waiting for input or finished"
 
 	if m.cfg.Notification.Desktop {
-		notify.Desktop("gclaude: Input Required",
-			"Branch '"+sess.Branch+"' is waiting for input")
+		notify.Desktop(title, message)
 	}
 
 	if m.cfg.Notification.Sound {
 		notify.Sound(m.cfg.Notification.SoundFile)
 	}
-}
-
-func getLastLines(s string, n int) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	if len(lines) <= n {
-		return s
-	}
-	return strings.Join(lines[len(lines)-n:], "\n")
 }
