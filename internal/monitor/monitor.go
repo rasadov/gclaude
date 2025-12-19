@@ -130,6 +130,22 @@ func (m *Monitor) checkSessions() {
 }
 
 func (m *Monitor) notify(sess *session.Session) {
+	// Skip notification if user had recent keyboard input (within idle threshold)
+	// This means user is actively typing/thinking
+	if tmux.HasRecentInput(sess.TmuxSession, m.cfg.Monitor.IdleThresholdS) {
+		return
+	}
+
+	// Check if user is actively viewing this session
+	// Skip notification if: attached AND terminal window is focused
+	if tmux.IsSessionAttached(sess.TmuxSession) {
+		tty := tmux.GetAttachedClientTTY(sess.TmuxSession)
+		if tty != "" && notify.IsTerminalFocused(tty) {
+			// User is looking at this session - no notification needed
+			return
+		}
+	}
+
 	title := "gclaude: " + sess.Branch
 	message := "Claude has stopped - waiting for input or finished"
 

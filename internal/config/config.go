@@ -39,7 +39,7 @@ func DefaultConfig() *Config {
 		},
 		Monitor: MonitorConfig{
 			PollIntervalMs: 500,
-			IdleThresholdS: 2,
+			IdleThresholdS: 10,  // 10 seconds before considering idle
 			DebounceSecs:   30,
 		},
 	}
